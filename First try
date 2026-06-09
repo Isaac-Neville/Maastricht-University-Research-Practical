@@ -161,7 +161,7 @@ def menu():
     print("\nWelcome to the VR Analysis program!")                             # header
     print("\nThis tool will enable you to make sense of all the data that")     # explanation
     print("\nMenu")
-    print("1)"           )
+    print("1)"          )
 
 
 def saccade_detection():
