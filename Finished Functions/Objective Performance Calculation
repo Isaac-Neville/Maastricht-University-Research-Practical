@@ -1,0 +1,12 @@
+#When calling this function add the columns OBJECT_ON_LIST and PICKED_OBJECT from the dictionary
+def objective_performance(object_on_list, picked_object):
+    object_on_list = object_on_list[1:] #Skip first row
+    picked_object = picked_object[1:] #Skip first row
+    score = 0
+
+    for i in range(len(object_on_list)):
+        if object_on_list[i] == "True":
+            score += 1
+        elif object_on_list[i] == "False" and picked_object[:i].count(picked_object[i]) % 2 == 1:
+            score -= 1  #−1 for every 2nd wrong pick of the same item (2nd, 4th, 6th...)
+    return score    #If percentages are needed: return (score / len(object_on_list)) * 100  
