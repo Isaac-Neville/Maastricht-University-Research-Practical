@@ -5,7 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
-# ===========================================================================================================================================================
+""" ===========================================================================================================================================================
 # VR SUPERMARKET EYE-TRACKING PIPELINE
 # Research Project: Seeing Through Sensory Overstimulation
 # Faculty of Psychology and Neuroscience, Maastricht University
@@ -27,12 +27,17 @@ import numpy as np
 # ===========================================================================================================================================================
 #
 #   STAGE 0 — CONFIGURATION
+#
 #       - Shopping lists per condition (task-relevant item sets)
 #       - Condition number → condition type mapping (requires clarification)
+#           Con1 -> low load
+#           Con2 -> medium load
+#           Con3 -> high load
 #       - Thresholds: fixation minimum duration, teleportation detection,
 #                 blink/tracker-loss detection
 #       
 #   STAGE 1 — FILE INGESTION
+#
 #       - Locate all file pairs in the data directory
 #       - Parse participant ID and condition number from filename
 #       - Load task file    (semicolon-delimited, 3 columns)
@@ -40,6 +45,7 @@ import numpy as np
 #
 #
 #   STAGE 2 — DATA CLEANING
+#
 #       2a. Blink / tracker-loss detection
 #           -> flag samples with zeroed, frozen, or out-of-range values
 #       2b. Teleportation detection
@@ -48,65 +54,62 @@ import numpy as np
 #           -> establish shared time reference between task and eye files
 #
 #   STAGE 3 — GAZE VELOCITY & ACCELERATION
+#
 #       3a. Convert GAZE_DIR Euler angles (X,Y,Z) -> unit vectors   
+#       3b. Compute angular displacement (AD) between consecutive samples
+#       3c. Divide AD by time delta -> velocity (degrees/second)
+#       3d. Compute change in velocity between samples -> acceleration
+#       3e. Apply Savitzky-Golay smoothing to velocity signal
 #
+#   STAGE 4 — EVENT CLASSIFICATION (Nyström & Holmqvist, 2010)
 #
+#       4a. Compute adaptive velocity threshold from noise characteristics
+#       4b. Classify each sample: saccade/glissade/fixation candidate
+#       4c. Merge glissades into preceeding saccade (glissade policy)
+#       4d. Apply minimum duration filter to fixations (ca. 100ms/ 6 samples)
+#       4e. Output: every sample labeled as fixation / saccade / excluded
 #
+#   STAGE 5 — AOI FIXATION AGGREGATION
 #
+#       5a. For each fixation event, assign object label (majority vote)
+#       5b. Classify fixation as task-relevant / task-irrelevant / neither
+#           -> relevant   : object is on shopping list for this condition
+#           -> irrelevant : object is not on shopping list for this condition
+#           -> neither    : OBJECT = "nothing"
+#       5c. Compute per-condition eye-tracking metrics:
+#           -> Total fixation duration (relevant vs irrelevant, neither)
+#           -> Ratio: relevant / (relevant + irrelevant) [main DV]
+#           -> Number of fixations on relevant vs irrrelevant items
+#           -> Mean fixation duration on relevant vs irrelevant items
+#           -> Saccade rate (saccaddes per second)
+#           -> Saccade count (total, and between relevant items specifically)
+#     
+#   STAGE 6 — TASK PERFORMANCE
+#
+#       6a. Separate picks into correct (OBJECT_ON_LIST = TRUE)
+#                           and incorrect (OBJECT_ON_LIST = FALSE)
+#       6b. Performance score = correct picks / 7
+#       6c. Grab accuracy = correct picks / total picks
+#           -> sensitive measure of accidental grabbing
+#       6d. Task completion time = last timestamp - first timestamp
+#
+#   STAGE 7 — OUTPUT
+#   
+#       7a. Combine all metrics into one row per participant X condition
+#       7b. Include placeholder columns for questionnaire data (SPS, fatigue, overload, perceived performance) — empty for now, ready for now, ready to merge
+#       7c. Write results.csv
+#
+# ===========================================================================================================================================================
+#
+#   OPEN QUESTIONS
+#
+#       - Is GAZE_DIR factored out of camera rotation? (i.e., world space or head-relative space?)
+#       - How to handle teleportation events (sudden CAM_POS jumps) that create artificial velocity spikes? Flag and exclude before running detection?
+#       - Glissade policy: assign to saccade (exclude from fixation time) or assign to fixation (inflate fixation durations)? Assigning to saccade is preferable (easier to state in methods, avoids inflating fixation durations)
+#       - Fixation minimum duration: standard lower bound is ca. 100ms; with our sampling rate (16ms) -> 6 samples  
+#
+# """
 
-"""
-This tool will allow us to:
-
-    - clean the raw data output for the VR-task and eye-tracking
-    - translate data for JASP analysis
-    - perform rudimentary calculations
-
-
-Data pipeline:
-
-Velocity computation (three-stages)
-
-    1. Convert GAZE_DIR_X/Y/Z (Euler angles) -> 3D unit vector, for every sample
-    2. Compute angular displacement between consecutive unit vectors (dot product -> arccos -> degrees)
-    3. Divide by the time delta between samples -> degrees per second
-
-Followed by Savitzky-Golay smoothing, then adaptive threshold detection
-
-Event classification:
-
-Saccade -> velocity above *adaptive* threshold, sustained for a minimum duration
-            compute from standard deviation of velocity signal during presumed quiet periods
-            (Nyström & Holmqvist (2010))
-
-Glissade -> low-velocity wobble immediately following a saccade offset
-            need to assign glissade either to saccade or fixation
-                assigning to saccade is preferable (exclude from fixation time)
-                    avoids inflating fixation durations (easy to state in methods)
-
-Fixation -> everything remaining after saccades and glissades are removed, subject to a minimum duration filter
-                standard lower bound is ca. 100ms; with our sampling rate (16ms) -> 6 samples
-    
-
-
-
-
-Notes:
-
-- velocity signal needs smoothing first (noise)
-    Savitzky-Golay filter (Nyström & Holmqvist (2010))
-        if raw gaze direction values are differentiated without smoothing, we'll get spurious saccade detections everywhere
-
-- Is GAZE_Dir factored out of camera rotation?
-
-- Does GAZE_DIR represent world space or head-relative space??
-
-- teleportation events (sudden CAM_POS jumps) will create artificial velocity spikes (could be misclassified as saccades);
-    they need to be flagged and excluded before running detection
-
-- Is 
-
-      
-''"""
 
 """ Lists """
 
