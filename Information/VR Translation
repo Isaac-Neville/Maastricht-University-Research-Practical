@@ -62,7 +62,7 @@
 #   KINEMATICS      euler_to_unit_vector, compute_angular_displacement,
 #                   compute_velocity, compute_acceleration, smooth_velocity
 #   DETECTION       compute_adaptive_threshold, classify_samples,
-#                   apply_glissade_policy, apply_fixation_duration_filter
+#                   apply_fixation_duration_filter
 #   METRICS         assign_fixation_objects, classify_fixation_relevance,
 #                   compute_eye_metrics
 #   PERFORMANCE     compute_task_performance
