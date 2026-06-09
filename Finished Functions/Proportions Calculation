@@ -4,5 +4,4 @@ def eye_tracking_proportions(objects_looked_at, shopping_list):
     for i in range(len(objects_looked_at)):
         if (objects_looked_at[i] in shopping_list): 
             relevant_item += 1.0
-    proportion = relevant_item / len(objects_looked_at)
-    return proportion
+    return relevant_item / len(objects_looked_at)
