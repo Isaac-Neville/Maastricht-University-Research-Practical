@@ -1,0 +1,453 @@
+""" 
+# ===========================================================================================================================================================
+# VR SUPERMARKET EYE-TRACKING PIPELINE
+# Research Project: Seeing Through Sensory Overstimulation
+# Faculty of Psychology and Neuroscience, Maastricht University
+# ===========================================================================================================================================================
+#
+#   PURPOSE:
+#       Process raw VR task and eye-tracking data into JASP-ready CSV.
+#       One output row per participant per condition (3 rows)
+#
+#   INPUT FILES (per participant, per condition):
+#       - Con{c}_ID{id}_VRSuperMarket_{n}_(datetime).txt        -> task data
+#       - Con{c}_ID{id}_VRSuperMarket_Eye_{n}_(datetime).txt    -> eye-tracking data
+#
+#   OUTPUT:
+#       - results.csv -> one row per participant X condition, JASP-compatible
+#
+# ===========================================================================================================================================================
+#   PIPELINE STAGES
+# ===========================================================================================================================================================
+#
+#   STAGE 0 — CONFIGURATION
+#
+#       - Shopping lists per condition (task-relevant item sets)
+#       - Condition number → condition type mapping (requires clarification)
+#           Con1 -> low load
+#           Con2 -> medium load
+#           Con3 -> high load
+#       - Thresholds: fixation minimum duration, teleportation detection,
+#                 blink/tracker-loss detection
+#       
+#   STAGE 1 — FILE INGESTION
+#
+#       - Locate all file pairs in the data directory
+#       - Parse participant ID and condition number from filename
+#       - Load task file    (semicolon-delimited, 3 columns)
+#       - Load eye file     (semicolon-delimited, 16 columns)
+#
+#
+#   STAGE 2 — DATA CLEANING
+#
+#       2a. Blink / tracker-loss detection
+#           -> flag samples with zeroed, frozen, or out-of-range values
+#       2b. Teleportation detection
+#           -> flag samples around sudden CAM_POS jumps
+#       2c. Time alignment
+#           -> establish shared time reference between task and eye files
+#
+#   STAGE 3 — GAZE VELOCITY & ACCELERATION
+#
+#       3a. Convert GAZE_DIR Euler angles (X,Y,Z) -> unit vectors   
+#       3b. Compute angular displacement (AD) between consecutive samples
+#       3c. Divide AD by time delta -> velocity (degrees/second)
+#       3d. Compute change in velocity between samples -> acceleration
+#       3e. Apply Savitzky-Golay smoothing to velocity signal
+#
+#   STAGE 4 — EVENT CLASSIFICATION (Nyström & Holmqvist, 2010)
+#
+#       4a. Compute adaptive velocity threshold from noise characteristics
+#       4b. Classify each sample: saccade/glissade/fixation candidate
+#       4c. Merge glissades into preceeding saccade (glissade policy)
+#       4d. Apply minimum duration filter to fixations (ca. 100ms/ 6 samples)
+#       4e. Output: every sample labeled as fixation / saccade / excluded
+#
+#   STAGE 5 — AOI FIXATION AGGREGATION
+#
+#       5a. For each fixation event, assign object label (majority vote)
+#       5b. Classify fixation as task-relevant / task-irrelevant / neither
+#           -> relevant   : object is on shopping list for this condition
+#           -> irrelevant : object is not on shopping list for this condition
+#           -> neither    : OBJECT = "nothing"
+#       5c. Compute per-condition eye-tracking metrics:
+#           -> Total fixation duration (relevant vs irrelevant, neither)
+#           -> Ratio: relevant / (relevant + irrelevant) [main DV]
+#           -> Number of fixations on relevant vs irrrelevant items
+#           -> Mean fixation duration on relevant vs irrelevant items
+#           -> Saccade rate (saccaddes per second)
+#           -> Saccade count (total, and between relevant items specifically)
+#     
+#   STAGE 6 — TASK PERFORMANCE
+#
+#       6a. Separate picks into correct (OBJECT_ON_LIST = TRUE)
+#                           and incorrect (OBJECT_ON_LIST = FALSE)
+#       6b. Performance score = correct picks / 7
+#       6c. Grab accuracy = correct picks / total picks
+#           -> sensitive measure of accidental grabbing
+#       6d. Task completion time = last timestamp - first timestamp
+#
+#   STAGE 7 — OUTPUT
+#   
+#       7a. Combine all metrics into one row per participant X condition
+#       7b. Include placeholder columns for questionnaire data (SPS, fatigue, overload, perceived performance) — empty for now, ready for now, ready to merge
+#       7c. Write results.csv
+#
+# ===========================================================================================================================================================
+#
+#   OPEN QUESTIONS
+#
+#       - Is GAZE_DIR factored out of camera rotation? (i.e., world space or head-relative space?)
+#       - How to handle teleportation events (sudden CAM_POS jumps) that create artificial velocity spikes? Flag and exclude before running detection?
+#       - Glissade policy: assign to saccade (exclude from fixation time) or assign to fixation (inflate fixation durations)? Assigning to saccade is preferable (easier to state in methods, avoids inflating fixation durations)
+#       - Fixation minimum duration: standard lower bound is ca. 100ms; with our sampling rate (16ms) -> 6 samples  
+#
+"""
+
+# ===========================================================================================================================================================
+
+# --- IMPORTS ---
+
+# os    : interact with file system
+# re    : regular expressions for info extraction from filenames
+# sys   : for exiting program on error
+# csv   : for reading/writing CSV files
+# scipy.stats : for computing noise characteristics (velocity threshold)
+# pandas : DataFrame operations, used for loading and manipulating tabular data
+# matplotlib.pyplot : for plotting (optional, for debugging/EDA)
+# numpy  : for numerical operations (e.g., smoothing)
+# savgol_filter : for velocity signal smoothing (Savitzky-Golay filter)
+
+import os
+import re
+import sys
+import csv
+import scipy.stats as stats
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.signal import savgol_filter
+
+
+
+# ===========================================================================================================================================================
+#                   STAGE 0 - CONFIGURATION
+# ===========================================================================================================================================================
+#       All thresholds and constants are defined here for easy access and modification
+
+# Maps condition number (from filename) to a human-readable condition label.
+# Con1 = low stimuli, Con2 = medium, Con3 = high — confirmed fixed mapping.
+CONDITION_MAP = {
+    1: "low",
+    2: "medium",
+    3: "high"
+}
+
+# Shopping lists per condition (sets of relevant item labels)
+SHOPPING_LISTS = {
+    1: ["mineraalwater", "orange", "croissant", "pudding vanille", "kokosmelk", "soep tomaat", "chips naturel"],
+    2: ["brood wit", "cupcakes", "kiwi", "chips paprika", "green ice tea", "melk vol", "pudding kokos"],
+    3: ["pudding chocolade", "melk halfvol", "koekjes chocolade", "melon", "rijstwafels", "ice tea peach", "tortilla chips"]
+}
+
+# Minimum duration (in ms) for a gaze event to be counted as fixation rather than noise
+# Below this, teh event is excluded
+# 100ms is the standard lower bound for fixation duration in eye-tracking research; with our sampling rate (16ms), this corresponds to 6 samples
+FIXATION_MIN_DURATION_MS = 100
+
+# How large a jump in camera position (in Unity units) qualifies as teleportation, which creates artificial velocity spikes in the gaze data
+TELEPORT_THRESHOLD_M = 1.0  # This is an example value; the actual threshold may need to be determined empirically based on the data
+
+# Tracker loss event is flagged when gaze data is zeroed, frozen, or out of plausible range
+TRACKER_LOSS_ZERO_RUNS = 3
+
+# Savitzky-Golay filter settings for smoothing the velocity signal (window length and polynomial order)
+# WINDOW: number of samples to fit a polynominal over — must be odd
+#         7 samples at 16ms sampling rate corresponds to 112ms, which is a reasonable smoothing window for eye-tracking velocity data
+# POLY:   degree of the polynomial used for fitting (2 = quadratic)
+SAVGOL_WINDOW = 7
+SAVGOL_POLY = 2
+
+LIST_LENGTH = 7 # number of items on the shopping list per condition, used for performance scoring
+
+
+# ===========================================================================================================================================================
+#                  STAGE 1 - FILE INGESTION
+# ===========================================================================================================================================================
+# Goal: locate all file pairs, parse participant ID and condition, load data into memory
+
+def find_file_pairs(data_dir):
+    """
+   Scan data_dir for all .txt files and match each task file with its corresponding eye-tracking file, based on participant ID and condition number extracted from the filename. Returns a list of tuples: (participant_id, condition, task_file_path, eye_file_path).
+
+   A valid pair shares the same Con{n} and ID{n} in the filename, with one
+    file containing 'Eye' and the other not.
+
+    Returns a list of dicts, one per pair:
+
+        {
+            "participant_id":   str,
+            "condition_number": int,
+            "task_path":        str,
+            "eye_path":         str
+        }
+    Prints a warning for any file that cannot be paired.
+        ...
+
+    """
+    pass
+
+
+def parse_filename(filename):
+    """
+    Use a regular expression to extract structured information from a filename.
+
+    Expected filename format:
+        Task file: Con{c}_ID{id}_VRSuperMarket_0_(datetime).txt
+        Eye file:  Con{c}_ID{id}_VRSuperMarket_Eye_0_(datetime).txt
+
+    The regex looks for:
+        - Condition number (c): after 'Con' and before '_ID'
+        - Participant ID (id): after 'ID' and before '_VRSuperMarket'
+        - Eye-tracking indicator: presence of 'Eye' in the filename 
+
+    Returns:
+        condition_num   (int)   : e.g. 1
+        participant_id  (str)   : e.g. '9154'
+        is_eye          (bool)  : True if 'Eye' is in the filename, False otherwise
+    
+    """
+    pass
+
+
+def load_task_file(path):
+    """
+    Load a task file (semicolon-delimited, 3 columns) into a pandas DataFrame.
+
+    Expected columns:
+        - TIMESTAMP:        time of the event in seconds        (float)
+        - PICKED_OBJECT:    label of the object interacted with (str)
+        - OBJECT_ON_LIST:   True if item was on shopping list   (bool)
+
+    The OBJECT_ON_LIST column comes in as a string ("TRUE"/"FALSE") and needs to be converted to boolean.
+
+    Returns:
+        pandas DataFrame with columns ['TIMESTAMP', 'PICKED_OBJECT', 'OBJECT_ON_LIST']
+    """
+    pass
+
+def load_eye_file(path):
+    """
+    Load an eye-tracking file (semicolon-delimited, 16 columns) into a pandas DataFrame.
+
+    ~9500 rows per file at ~16ms sampling interval.
+
+    Expected columns:
+        - TIMESTAMP                                     : float, seconds
+        - CAM_POS_X, CAM_POS_Y, CAM_POS_Z               : camera (head) position in Unity world coordinates (floats)
+        - CAM_ROT_X, CAM_ROT_Y, CAM_ROT_Z               : camera (head) rotation in Euler angles (degrees, floats)
+        - GAZE_ORIGIN_X, GAZE_ORIGIN_Y, GAZE_ORIGIN_Z   : origin point of the gaze ray
+        - GAZE_DIR_X, GAZE_DIR_Y, GAZE_DIR_Z            : gaze direction vector in Euler angles (degrees, floats)
+        - PUPIL_LEFT, PUPIL_RIGHT                       : pupil diameter in mm (floats) not used in current analyses but loaded for completeness
+        - OBJECT                                        : label of the object currently gazed at (str, "nothing" if no object)
+
+    Returns:
+        pandas DataFrame with the above columns.
+    """
+    pass
+
+# ===========================================================================================================================================================
+#                  STAGE 2 - DATA CLEANING  
+# ========================================================================================================================================================
+# Goal: flag and exclude invalid samples (tracker loss, teleportation)
+# We never delete rows — we add boolean flag columns so we can filter out invalid samples in later stages without losing the original data
+
+def detect_tracker_loss(eye_df):
+    """
+    Identify samples where the eye-tracker has lost the gaze signal.
+    Typically happens during blinks or when the headset slips
+    
+    Detection strategy:
+        1. Any sample where GAZE_DIR_X, Y, Z are all exactly 0.0
+           is almost certainly a tracker loss event (eye-tracker outputs zeroed data when it loses the signal)
+        2. Runs of TRACKER_LOSS_ZERO_RUNS or more consecutive zeroed samples are flagged as tracker loss periods
+           (to avoid flagging brief noise spikes as tracker loss, we look for runs of consecutive zero samples)
+
+    Adds a boolean column 'TRACKER_LOSS' to the eye_df DataFrame
+        True  = sample should be excluded from analysis
+        False = sample is valid
+
+    Modifies eye_df in place and also returns it.
+    """
+    pass
+
+
+def detect_teleportation(eye_df):
+    """
+    Identify samples around teleportation events, which create artificial velocity spikes in the gaze data.
+
+    Detection strategy:
+        1. Compute the Euclidean distance between consecutive CAM_POS samples
+        2. Flag any sample where this distance exceeds the TELEPORT_THRESHOLD_M as a teleportation event
+        3. Optionally, also flag a few samples before and after the detected teleportation to account for pre- and post-teleportation artifacts
+
+    Adds a boolean column 'TELEPORT' to the eye_df DataFrame
+        True  = sample should be excluded from analysis
+        False = sample is valid
+
+    Modifies eye_df in place and also returns it.
+    """
+    pass
+
+def align_timestamps(task_df,eye_df):
+    """
+    Align both files to a shared time reference using the eye file's
+    minimum timestamp as the session origin.
+
+    Why eye file as reference: the task file only starts logging at the
+    first grab, which may be well into the condition. Using its own
+    minimum would lose the pre-grab search period entirely.
+
+    Procedure:
+        1. Take eye_df's minimum timestamp as the session origin.
+        2. Subtract it from ALL timestamps in both DataFrames.
+        3. Eye file starts at 0.0; task file starts at whenever the
+           first grab occurred relative to condition onset.
+
+    Note: timestamps are floats — confirm unit (ms vs seconds) before
+    running, as this affects all duration comparisons in Stages 4 and 5.
+
+    Returns (eye_df, task_df) with aligned timestamps.
+    """
+    pass
+
+# ===========================================================================================================================================================
+#                   STAGE 3 - GAZE VELOCITY & ACCELERATION
+# ========================================================================================================================================================  
+# Goal: convert raw gaze direction samples into velocity signal, which is needed for event classification in Stage 4
+
+# OBJECT column only tells us what item is being looked at, not the dynamics of the eye-movement
+# Saccade detection requires knowing the speed of eye movements, which we can estimate from the GAZE_DIR Euler angles by computing the angular displacement between consecutive samples and dividing by the time delta to get velocity in degrees/second. We can also compute acceleration as the change in velocity between samples.
+
+def euler_to_unit_vector(gaze_dir_x, gaze_dir_y, gaze_dir_z):
+    """
+    Convert GAZE_DIR Euler angles (X,Y,Z in degrees) to a unit vector.
+
+    This is necessary because the gaze direction is given in Euler angles, but for velocity calculations we need to work with the actual direction vector in 3D space.
+
+    Procedure:
+        1. Convert Euler angles from degrees to radians.
+        2. Compute the unit vector components using the standard conversion from spherical coordinates (assuming gaze_dir_x = pitch, gaze_dir_y = yaw, gaze_dir_z = roll):
+            - x = cos(pitch) * sin(yaw)
+            - y = sin(pitch)
+            - z = cos(pitch) * cos(yaw)
+
+    Input:  three arrays of shape (n_samples) — the three Euler angle columns
+    Output: array of shape (n_samples, 3) — one unit vector per sample
+    """
+    pass
+
+
+def compute_angular_displacement(unit_vectors):
+    """
+    Compute the angular displacement (AD) between consecutive gaze direction unit vectors.
+
+    Angular displacement is the angle between two vectors, which can be computed using the dot product formula:
+        AD = arccos( (v1 . v2) / (|v1| * |v2|) )
+
+    ... 
+
+
+    """
+    pass
+
+# ===========================================================================================================================================================
+
+# ===========================================================================================================================================================
+
+
+
+
+
+# ===========================================================================================================================================================
+
+# ===========================================================================================================================================================
+
+
+
+
+
+# ===========================================================================================================================================================
+
+# ===========================================================================================================================================================
+
+""" Lists """
+
+# save raw time floats from output
+
+time_eye_test_raw , time_test_raw , time_eye_con1_raw , time_con1_raw , time_eye_con2_raw , time_con2_raw , time_eye_con3_raw , time_con3_raw = [],[],[],[],[],[],[],[]
+
+time_eye_test_raw , time_test_raw , time_eye_con1_raw , time_con1_raw , time_eye_con2_raw , time_con2_raw , time_eye_con3_conv , time_con3_conv = [],[],[],[],[],[],[],[]
+
+
+
+# CAM_POS_X
+# CAM_POS_Y
+# CAM_POS_Z
+# CAM_ROT_X
+# CAM_ROT_Y
+# CAM_ROT_Z
+# GAZE_ORIGIN_X
+# GAZE_ORIGIN_Y
+# GAZE_ORIGIN_Z
+# GAZE_DIR_X
+# GAZE_DIR_Y
+# GAZE_DIR_Z
+# PUPIL_LEFT
+# PUPIL_RIGHT
+# OBJECT	
+
+
+
+
+""" Functions library """
+
+
+
+def conv_time(time_float):      
+
+    hours_float = float(time_float)     # including flaot from calculations in function
+    total_seconds = hours_float * 3600      # convert hours into seconds (still float)
+    seconds_int = int(total_seconds)        # convert float into integer
+
+    hours = seconds_int // 3600     # calc amount of hrs
+    r_m = seconds_int - (hours * 3600)      # calc remaining seconds after subtraction of hours
+    minutes = r_m // 60     # calc amount of minutes
+    seconds =  r_m - (minutes * 60)     # calc amount of seconds
+    
+    print(hours,":",minutes,":",seconds)        # giving output in hh:mm:ss format
+
+
+
+def menu():                                                                     
+
+    print("\nWelcome to the VR Analysis program!")                             # header
+    print("\nThis tool will enable you to make sense of all the data that")     # explanation
+    print("\nMenu")
+    print("1)"           )
+
+
+def saccade_detection():
+
+# compute velocity
+#   distance between gaze positions div by time between samples
+
+# acceleration
+#   change in velocity between samples
+
+
+
+
+def euler_angle():
+
+#   
