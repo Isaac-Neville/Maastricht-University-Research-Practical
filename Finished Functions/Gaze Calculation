@@ -13,3 +13,6 @@ def shift_frequency(gaze_x, gaze_y, gaze_z):
         if angle > 3.0: #threshold
             shifts += 1
     return shifts / len(gaze_x)  # shifts per frame
+
+
+#This is jut a first draft, idk if this works
