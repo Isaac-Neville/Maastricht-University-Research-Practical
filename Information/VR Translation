@@ -507,28 +507,17 @@ if __name__ == "__main__":
     menu()
 
 
-python vr_pipeline.py
-    → menu()
-        → run_all()
-            → find_file_pairs()
-            → for each participant:
-                → process_pair()
-                    → load_task_file()
-                    → load_eye_file()
-                    → detect_tracker_loss()
-                    → detect_teleportation()
-                    → align_timestamps()
-                    → euler_to_unit_vector()
-                    → compute_angular_displacement()
-                    → compute_velocity()
-                    → compute_acceleration()
-                    → smooth_velocity()
-                    → compute_adaptive_threshold()
-                    → classify_samples()
-                    → apply_fixation_duration_filter()
-                    → assign_fixation_objects()
-                    → classify_fixation_relevance()
-                    → compute_eye_metrics()
-                    → compute_task_performance()
-                → build_output_row()
-            → write_results()
+def saccade_detection():
+
+# compute velocity
+#   distance between gaze positions div by time between samples
+
+# acceleration
+#   change in velocity between samples
+
+
+
+
+def euler_angle():
+
+#   

@@ -1,0 +1,8 @@
+#When calling this function 1. add the column objects from the dictionary and 2. the appropriate shopping list as an array
+def eye_tracking_proportions(objects_looked_at, shopping_list):
+    objects_looked_at = objects_looked_at[1:]  #Skip first row
+    relevant_item = 0.0
+    for i in range(len(objects_looked_at)):
+        if (objects_looked_at[i] in shopping_list): 
+            relevant_item += 1.0
+    return relevant_item / len(objects_looked_at)

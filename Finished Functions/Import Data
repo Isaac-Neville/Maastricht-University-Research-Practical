@@ -1,0 +1,86 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import pandas as pd
+import os
+import re
+
+#Folder Selection
+def choose_folder():
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showinfo(
+        "Welcome",
+        "Welcome to the data storing part.\n\nSelect the folder containing all participant files."
+    )
+    folder = filedialog.askdirectory(title="Select Folder")
+    return folder
+
+#Extract Participant ID / Condition / File Type
+def extract_info(filename):
+    condition_match = re.search(r"(Con\d+)", filename)
+    id_match = re.search(r"ID(\d+)", filename)
+
+    condition = condition_match.group(1) if condition_match else None
+    participant_id = id_match.group(1) if id_match else None
+
+    if "Eye" in filename:
+        file_type = "eye"
+    else: 
+        file_type = "vr"
+
+    return participant_id, condition, file_type
+
+#Load Data
+def load_all_data():
+    folder = choose_folder()
+    if not folder:
+        print("No folder selected.")
+        return None
+
+    all_data = {}
+
+    for file in os.listdir(folder):
+        if not file.endswith(".txt"):
+            continue
+
+        participant_id, condition, file_type = extract_info(file)
+        if participant_id is None or condition is None:
+            print(f"Skipped: {file}")
+            continue
+
+        filepath = os.path.join(folder, file)
+
+        try:
+            df = pd.read_csv(
+                filepath,
+                sep=";",
+                engine="python"
+            )
+            #Remove empty final column caused by trailing ;
+            df = df.dropna(axis=1, how="all")
+
+        except Exception as e:
+            print(f"Could not load {file}")
+            print(e)
+            continue
+
+        #Create participant
+        if participant_id not in all_data:
+            all_data[participant_id] = {}
+        #Create condition
+        if condition not in all_data[participant_id]:
+            all_data[participant_id][condition] = {}
+        # Store dataframe
+        all_data[participant_id][condition][file_type] = df
+        # Store variables separately
+        variable_dict = {}
+
+        for column in df.columns:
+            variable_dict[column] = df[column]
+
+        all_data[participant_id][condition][f"{file_type}_variables"] = variable_dict
+
+    return all_data
+
+#Run Program
+all_data = load_all_data()

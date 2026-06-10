@@ -1,0 +1,18 @@
+import math
+
+def shift_frequency(gaze_x, gaze_y, gaze_z):
+    shifts = 0
+    for i in range(1, len(gaze_x)):
+        # angle between consecutive gaze directions via dot product
+        v1 = (gaze_x[i-1], gaze_y[i-1], gaze_z[i-1])
+        v2 = (gaze_x[i], gaze_y[i], gaze_z[i])
+        dot = sum(a * b for a, b in zip(v1, v2))
+        mag1 = math.sqrt(sum(a**2 for a in v1))
+        mag2 = math.sqrt(sum(b**2 for b in v2))
+        angle = math.degrees(math.acos(max(-1, min(1, dot / (mag1 * mag2 + 1e-9)))))
+        if angle > 3.0: #threshold
+            shifts += 1
+    return shifts / len(gaze_x)  # shifts per frame
+
+
+#This is jut a first draft, idk if this works
