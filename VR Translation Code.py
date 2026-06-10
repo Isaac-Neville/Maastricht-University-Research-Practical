@@ -182,21 +182,18 @@ def detect_teleportation(eye_df):
     Adds boolean column TELEPORT.
     Returns eye_df.
     """
-    eye_df["TELEPORT"] = False
+    positions = eye_df[["CAM_POS_X", "CAM_POS_Y", "CAM_POS_Z"]].values
+    deltas    = np.diff(positions, axis=0)
+    distances = np.linalg.norm(deltas, axis=1)
 
-    for i in range(1, len(eye_df)):
+    # +1 because diff reduces length by 1 (index i refers to the gap before row i)
+    jump_indices = np.where(distances > TELEPORT_THRESHOLD)[0] + 1
 
-        # compute distance between this sample and the previous one
-        dx = eye_df.iloc[i]["CAM_POS_X"] - eye_df.iloc[i-1]["CAM_POS_X"]
-        dy = eye_df.iloc[i]["CAM_POS_Y"] - eye_df.iloc[i-1]["CAM_POS_Y"]
-        dz = eye_df.iloc[i]["CAM_POS_Z"] - eye_df.iloc[i-1]["CAM_POS_Z"]
-        distance = (dx**2 + dy**2 + dz**2) ** 0.5 # square-root of deltas of each coordinate
+    mask = np.zeros(len(eye_df), dtype=bool)
+    for i in jump_indices:
+        mask[max(0, i - 1) : min(len(eye_df), i + 3)] = True
 
-        if distance > TELEPORT_THRESHOLD:
-            # flag the window around the jump
-            for j in range(max(0, i-1), min(len(eye_df), i+3)):
-                eye_df.iloc[j, eye_df.columns.get_loc("TELEPORT")] = True
-
+    eye_df["TELEPORT"] = mask
     return eye_df
 
 
@@ -205,12 +202,19 @@ def align_timestamps(eye_df, task_df):
     Subtract eye_df's minimum timestamp from both DataFrames.
     Eye file → starts at 0.0.
     Task file → preserves offset from condition onset (first grab may be late).
+    Normalises to seconds: if the median inter-sample interval is > 1
+    the timestamps are assumed to be in milliseconds and are divided by 1000.
     Returns (eye_df, task_df).
     """
     origin = eye_df["TIMESTAMP"].min()
 
     eye_df["TIMESTAMP"]  = eye_df["TIMESTAMP"]  - origin
     task_df["TIMESTAMP"] = task_df["TIMESTAMP"] - origin
+
+    # auto-detect millisecond timestamps — median gap > 1 means ms, not s
+    if eye_df["TIMESTAMP"].diff().median() > 1:
+        eye_df["TIMESTAMP"]  = eye_df["TIMESTAMP"]  / 1000
+        task_df["TIMESTAMP"] = task_df["TIMESTAMP"] / 1000
 
     return eye_df, task_df
 
@@ -220,12 +224,13 @@ def align_timestamps(eye_df, task_df):
 # =============================================================================
 # Convert raw Euler angles into a smoothed velocity signal for event detection.
 
-def euler_to_unit_vector(x_deg, y_deg, z_deg):
+def euler_to_unit_vector(x_deg, y_deg):
     """
-    Convert Euler angles (degrees) to 3D unit vectors.
+    Convert pitch/yaw Euler angles (degrees) to 3D unit vectors.
+    Roll (z) does not change where the eye points, so it is omitted.
     GAZE_DIR is head-relative, so no CAM_ROT subtraction needed.
 
-    Input:  three arrays (n_samples,)
+    Input:  two arrays (n_samples,)
     Output: array (n_samples, 3)
     """
     # convert degrees to radians — numpy trig functions require radians
@@ -251,18 +256,11 @@ def compute_angular_displacement(unit_vectors):
     Input:  (n_samples, 3)
     Output: (n_samples,) in degrees. First value = 0.
     """
+    dots = np.sum(unit_vectors[1:] * unit_vectors[:-1], axis=1)
+    dots = np.clip(dots, -1.0, 1.0)
+
     angles = np.zeros(len(unit_vectors))
-
-    for i in range(1, len(unit_vectors)):
-        # dot product of this vector and the previous one
-        dot = np.dot(unit_vectors[i], unit_vectors[i-1])
-
-        # clip to [-1, 1] to prevent floating point errors breaking arccos
-        dot = np.clip(dot, -1.0, 1.0)
-
-        # arccos gives the angle in radians, convert to degrees
-        angles[i] = np.degrees(np.arccos(dot))
-
+    angles[1:] = np.degrees(np.arccos(dots))
     return angles
 
 
@@ -344,6 +342,11 @@ def compute_adaptive_threshold(velocity):
         # isolate samples below the current threshold (presumed fixation)
         quiet_samples = velocity[velocity < threshold]
 
+        # guard: if nothing is below the threshold, the signal is all saccade —
+        # keep the current threshold rather than producing nan
+        if len(quiet_samples) == 0:
+            break
+
         # compute a new threshold from the noise floor of quiet samples
         new_threshold = np.mean(quiet_samples) + 6 * np.std(quiet_samples)
 
@@ -399,9 +402,13 @@ def apply_fixation_duration_filter(labels, timestamps):
                 i += 1
             run_end = i
 
+            # derive minimum sample count from the actual sampling interval
+            dt_ms      = np.median(np.diff(timestamps)) * 1000
+            min_samples = max(1, round(FIXATION_MIN_MS / dt_ms))
+
             # long enough → fixation, too short → saccade
             run_length = run_end - run_start
-            new_label = "fixation" if run_length >= 5 else "saccade"
+            new_label = "fixation" if run_length >= min_samples else "saccade"
 
             # apply the label to all samples in the run
             for j in range(run_start, run_end):
@@ -593,8 +600,14 @@ def objective_performance(object_on_list, picked_object):
     for i in range(len(object_on_list)):
         if object_on_list[i] == "True":
             score += 1
-        elif object_on_list[i] == "False" and picked_object[:i].count(picked_object[i]) % 2 == 1:
-            score -= 1    # -1 for every 2nd wrong pick of the same item
+        elif object_on_list[i] == "False":
+            # count only previous *wrong* picks of the same item
+            wrong_prior = sum(
+                1 for j in range(i)
+                if picked_object[j] == picked_object[i] and object_on_list[j] == "False"
+            )
+            if wrong_prior % 2 == 1:
+                score -= 1    # -1 for every 2nd wrong pick of the same item
     return score
 
 def compute_task_performance(task_df):
@@ -692,7 +705,7 @@ def process_pair(task_path, eye_path, participant_id, condition_num):
         valid = eye_df[~eye_df["TRACKER_LOSS"] & ~eye_df["TELEPORT"]].reset_index(drop=True)
 
         # stage 3 — kinematics
-        unit_vectors  = euler_to_unit_vector(valid["GAZE_DIR_X"], valid["GAZE_DIR_Y"], valid["GAZE_DIR_Z"])
+        unit_vectors  = euler_to_unit_vector(valid["GAZE_DIR_X"], valid["GAZE_DIR_Y"])
         angles        = compute_angular_displacement(unit_vectors)
         velocity      = compute_velocity(angles, valid["TIMESTAMP"].values)
         acceleration  = compute_acceleration(velocity)
@@ -838,7 +851,7 @@ def inspect_one(data_dir):
     valid = eye_df[~eye_df["TRACKER_LOSS"] & ~eye_df["TELEPORT"]].reset_index(drop=True)
     print(f"Valid samples        : {len(valid)}")
 
-    unit_vectors = euler_to_unit_vector(valid["GAZE_DIR_X"], valid["GAZE_DIR_Y"], valid["GAZE_DIR_Z"])
+    unit_vectors = euler_to_unit_vector(valid["GAZE_DIR_X"], valid["GAZE_DIR_Y"])
     angles       = compute_angular_displacement(unit_vectors)
     velocity     = compute_velocity(angles, valid["TIMESTAMP"].values)
     acceleration = compute_acceleration(velocity)
