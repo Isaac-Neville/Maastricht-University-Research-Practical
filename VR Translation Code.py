@@ -3,6 +3,9 @@ import re
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import matplotlib.pyplot as plt
 
 
 # =============================================================================
@@ -27,6 +30,7 @@ TRACKER_LOSS_MIN_RUNS    = 3      # consecutive zero-samples = tracker loss
 SAVGOL_WINDOW            = 7      # Savitzky-Golay window (must be odd)
 SAVGOL_POLY              = 2      # Savitzky-Golay polynomial order
 WRONG_GRAB_PENALTY       = 1      # penalty subtracted per incorrect grab
+SAMPLE_INTERVAL_MS       = 16     # nominal ms per eye-tracking sample (~62.5 Hz)
 
 
 # =============================================================================
@@ -391,6 +395,9 @@ def apply_fixation_duration_filter(labels, timestamps):
     Surviving candidates -> 'fixation'.
     Returns final labels: 'fixation' | 'saccade'
     """
+    dt_ms       = np.median(np.diff(timestamps)) * 1000
+    min_samples = max(1, round(FIXATION_MIN_MS / dt_ms))
+
     i = 0
     while i < len(labels):
 
@@ -401,10 +408,6 @@ def apply_fixation_duration_filter(labels, timestamps):
             while i < len(labels) and labels[i] == "fixation_candidate":
                 i += 1
             run_end = i
-
-            # derive minimum sample count from the actual sampling interval
-            dt_ms      = np.median(np.diff(timestamps)) * 1000
-            min_samples = max(1, round(FIXATION_MIN_MS / dt_ms))
 
             # long enough → fixation, too short → saccade
             run_length = run_end - run_start
@@ -542,8 +545,8 @@ def compute_eye_metrics(fixations_df, labels, timestamps):
         "fixation_ratio"                  : fixation_ratio,
         "fixation_time_relevant_ms"       : time_relevant,
         "fixation_time_irrelevant_ms"     : time_irrelevant,
-        "n_fixations_relevant"            : len(relevant),
-        "n_fixations_irrelevant"          : len(irrelevant),
+        "n_fixations_relevant"            : len(relevant)   / SAMPLE_INTERVAL_MS,
+        "n_fixations_irrelevant"          : len(irrelevant) / SAMPLE_INTERVAL_MS,
         "mean_fixation_dur_relevant_ms"   : mean_dur_relevant,
         "mean_fixation_dur_irrelevant_ms" : mean_dur_irrelevant,
         "saccade_rate"                    : saccade_rate,
@@ -594,8 +597,6 @@ def compute_eye_metrics(fixations_df, labels, timestamps):
 #    }
 
 def objective_performance(object_on_list, picked_object):
-    object_on_list = object_on_list[1:]   # skip first row
-    picked_object  = picked_object[1:]    # skip first row
     score = 0
     for i in range(len(object_on_list)):
         if object_on_list[i] == "True":
@@ -647,21 +648,24 @@ def build_output_row(participant_id, low_metrics, medium_metrics, high_metrics):
     Merge all three conditions into one row dict for this participant.
     One row per participant — 15 rows total in results.csv.
 
+    Column order: for each metric, low / medium / high sit next to each other.
     Returns a dict.
     """
-    row = {"participant_id": participant_id}
+    EXCLUDED = {"n_fixations_relevant", "n_fixations_irrelevant", "grab_accuracy", "performance_score"}
 
-    # add metrics for each condition with condition label as prefix
-    for label, metrics in [("low", low_metrics), ("medium", medium_metrics), ("high", high_metrics)]:
-        for key, value in metrics.items():
-            row[f"{label}_{key}"] = value
+    conditions = [("low", low_metrics), ("medium", medium_metrics), ("high", high_metrics)]
 
-    # questionnaire placeholders — filled after merge with Qualtrics data
-    row["sps_score"] = None
-    for label in ["low", "medium", "high"]:
-        row[f"{label}_post_fatigue"]            = None
-        row[f"{label}_perceived_overload"]      = None
-        row[f"{label}_perceived_performance"]   = None
+    row = {"participant_id": participant_id, "sps_score": None}
+
+    # group by metric so low/medium/high columns are adjacent
+    for metric in [k for k in low_metrics if k not in EXCLUDED]:
+        for label, metrics in conditions:
+            row[f"{label}_{metric}"] = metrics.get(metric)
+
+    # questionnaire placeholders grouped the same way
+    for placeholder in ["post_fatigue", "perceived_overload", "perceived_performance"]:
+        for label, _ in conditions:
+            row[f"{label}_{placeholder}"] = None
 
     return row
 
@@ -679,6 +683,80 @@ def write_results(rows, output_path):
 
     pd.DataFrame(rows).to_csv(output_path, index=False)
     print(f"Results written to {output_path}")
+
+# =============================================================================
+# VISUALISATION
+# =============================================================================
+
+def plot_velocity(velocity, timestamps, threshold):
+    """
+    Plot smoothed gaze velocity over time with adaptive threshold marked.
+    Useful for visually validating saccade detection.
+    """
+    plt.figure(figsize=(12, 4))
+
+    # velocity signal
+    plt.plot(timestamps, velocity, color="steelblue", linewidth=0.8, label="Gaze velocity")
+
+    # adaptive threshold as a horizontal line
+    plt.axhline(y=threshold, color="red", linewidth=1.2, linestyle="--", label=f"Threshold ({threshold:.1f} °/s)")
+
+    # labels and formatting
+    plt.xlabel("Time (s)")
+    plt.ylabel("Velocity (°/s)")
+    plt.title("Gaze Velocity Over Time")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_fixation_timeline(fixations_df, total_duration):
+    """
+    Plot fixation and saccade events as coloured blocks along the time axis.
+    Relevant fixations = green, irrelevant = red, neither = grey.
+    Useful for validating Stage 4 and Stage 5 output.
+    """
+    # colour mapping per relevance category
+    colour_map = {
+        "relevant"   : "green",
+        "irrelevant" : "red",
+        "neither"    : "lightgrey"
+    }
+
+    fig, ax = plt.subplots(figsize=(14, 3))
+
+    for _, fixation in fixations_df.iterrows():
+        colour = colour_map[fixation["relevance"]]
+        start  = fixation["start_time"]
+        width  = fixation["duration_ms"] / 1000   # convert ms to seconds
+
+        # draw fixation block
+        ax.barh(0, width, left=start, color=colour, edgecolor="none", height=0.5)
+
+        # label the object if the fixation is long enough to be readable
+        if fixation["duration_ms"] > 300:
+            ax.text(
+                start + width / 2, 0,
+                fixation["object"],
+                ha="center", va="center",
+                fontsize=6, color="white"
+            )
+
+    # legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="green",    label="Relevant"),
+        Patch(facecolor="red",      label="Irrelevant"),
+        Patch(facecolor="lightgrey",label="Neither"),
+    ]
+    ax.legend(handles=legend_elements, loc="upper right")
+
+    ax.set_xlim(0, total_duration)
+    ax.set_xlabel("Time (s)")
+    ax.set_yticks([])
+    ax.set_title("Fixation Timeline")
+    plt.tight_layout()
+    plt.show()
 
 # =============================================================================
 # STAGE 8 — ORCHESTRATION
@@ -863,8 +941,8 @@ def inspect_one(data_dir):
 
     labels = classify_samples(velocity, acceleration, threshold)
     labels = apply_fixation_duration_filter(labels, valid["TIMESTAMP"].values)
-    print(f"\nFixations  : {labels.count('fixation')}")
-    print(f"Saccades   : {labels.count('saccade')}")
+    print(f"\nFixations (frame-rate adjusted) : {labels.count('fixation') / SAMPLE_INTERVAL_MS:.1f}")
+    print(f"Saccades  (frame-rate adjusted) : {labels.count('saccade')  / SAMPLE_INTERVAL_MS:.1f}")
 
     fixations_df = assign_fixation_objects(valid, labels)
     fixations_df = classify_fixation_relevance(fixations_df, condition_num)
@@ -876,6 +954,9 @@ def inspect_one(data_dir):
     print(f"\nEye metrics  : {eye_metrics}")
     print(f"Task metrics : {task_metrics}")
 
+    # visualisation
+    plot_velocity(velocity, valid["TIMESTAMP"].values, threshold)
+    plot_fixation_timeline(fixations_df, valid["TIMESTAMP"].values[-1])
 
 # =============================================================================
 # STAGE 9 — MENU
@@ -894,17 +975,31 @@ MENU = """
 ╚══════════════════════════════════════════════════════╝
 """
 
+def choose_folder():
+    root = tk.Tk()
+    root.withdraw()
+
+    messagebox.showinfo(
+        "Welcome",
+        "Welcome to the data storing part.\n\nSelect the folder containing all participant files."
+    )
+
+    folder = filedialog.askdirectory(
+        title="Select Folder"
+    )
+
+    return folder
+
+
 def get_data_dir():
     """
-    Prompt for data directory path. Strip quotes (macOS drag-in).
-    Repeat until a valid directory is entered.
+    Open a GUI folder picker. Repeat until a valid directory is selected.
     """
     while True:
-        # strip quotes in case user drags folder into terminal on macOS
-        path = input("Enter path to data folder: ").strip().strip("'\"")
-        if os.path.isdir(path):
+        path = choose_folder()
+        if path and os.path.isdir(path):
             return path
-        print(f"  '{path}' is not a valid directory. Please try again.")
+        print("  No valid directory selected. Please try again.")
 
 def get_output_path():
     """
