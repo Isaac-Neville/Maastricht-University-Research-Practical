@@ -1,0 +1,534 @@
+# =============================================================================
+# VR SUPERMARKET EYE-TRACKING PIPELINE
+# Seeing Through Sensory Overload — FPN, Maastricht University
+# =============================================================================
+#
+# WHAT THIS SCRIPT DOES
+#   Converts raw VR task + eye-tracking files into a JASP-ready CSV.
+#   One row per participant (15 rows total). All three conditions are
+#   represented as column groups within that row.
+#
+# HOW TO READ THIS DOCUMENT
+#   1. CONFIGURATION      — all tunable constants, lists, mappings
+#   2. FILE INGESTION     — find, parse, load raw files
+#   3. DATA CLEANING      — flag invalid samples (never delete)
+#   4. GAZE KINEMATICS    — Euler → velocity → acceleration → smoothing
+#   5. EVENT DETECTION    — label every sample: fixation / saccade / excluded
+#   6. FIXATION METRICS   — aggregate fixation events → attentional DVs
+#   7. TASK PERFORMANCE   — compute accuracy and completion time
+#   8. OUTPUT             — assemble and write results.csv
+#   9. ORCHESTRATION      — run pipeline for one or all participants
+#  10. MENU               — user-facing interface
+#
+# PIPELINE IN ONE PARAGRAPH
+#   Files are found and parsed by participant/condition from the filename.
+#   The eye file is loaded (~9500 rows, ~16ms apart) and cleaned: tracker-loss
+#   and teleportation samples are flagged. Timestamps are aligned to the eye
+#   file's origin. Gaze direction (Euler angles) is converted to unit vectors;
+#   angular displacement between consecutive samples gives velocity (°/s).
+#   Velocity is smoothed (Savitzky-Golay), then an adaptive threshold
+#   (Nyström & Holmqvist, 2010) separates fixations from saccades/glissades.
+#   Glissades are merged into saccades. Fixations shorter than 100ms are
+#   dropped. Each surviving fixation is assigned an object label (majority
+#   vote) and classified as relevant, irrelevant, or neither (nothing).
+#   Per-condition attentional metrics are computed (fixation ratio, counts,
+#   durations, saccade rate). Task performance is computed from the grab log
+#   (accuracy, penalty score, completion time). All three conditions are
+#   combined into one row per participant and written to results.csv.
+#
+# KEY DVs
+#   Objective performance : correct_picks / 7
+#   Penalty score         : (correct - incorrect) / 7     ← wider spread
+#   Fixation ratio        : relevant / (relevant + irrelevant + neither)
+#   Saccade rate          : saccades / second
+#
+# OUTPUT STRUCTURE (one row per participant, columns grouped by condition)
+#   participant_id
+#   sps_score                                        ← baseline, measured once
+#   low_performance_score,    low_penalty_score,     low_grab_accuracy,
+#   low_completion_time_s,    low_fixation_ratio,    low_saccade_rate,
+#   low_n_saccades,           low_fixation_time_relevant_ms,
+#   low_fixation_time_irrelevant_ms,
+#   low_n_fixations_relevant, low_n_fixations_irrelevant,
+#   low_mean_fixation_dur_relevant_ms,
+#   low_mean_fixation_dur_irrelevant_ms,
+#   low_post_fatigue,         low_perceived_overload,
+#   low_perceived_performance
+#   ... same columns repeated for medium_ and high_
+#
+# FUNCTIONS (in order)
+#   INGESTION       find_file_pairs, parse_filename, load_task_file, load_eye_file
+#   CLEANING        detect_tracker_loss, detect_teleportation, align_timestamps
+#   KINEMATICS      euler_to_unit_vector, compute_angular_displacement,
+#                   compute_velocity, compute_acceleration, smooth_velocity
+#   DETECTION       compute_adaptive_threshold, classify_samples,
+#                   apply_fixation_duration_filter
+#   METRICS         assign_fixation_objects, classify_fixation_relevance,
+#                   compute_eye_metrics
+#   PERFORMANCE     compute_task_performance
+#   OUTPUT          build_output_row, write_results
+#   ORCHESTRATION   process_pair, run_all, run_one, preview_pairs, inspect_one
+#   MENU            menu, get_data_dir, get_output_path
+#
+# OPEN QUESTIONS
+#   - Confirm timestamp unit (seconds vs milliseconds)
+#
+# =============================================================================
+
+import os
+import re
+import numpy as np
+import pandas as pd
+from scipy.signal import savgol_filter
+
+
+# =============================================================================
+# STAGE 0 — CONFIGURATION
+# =============================================================================
+
+CONDITION_MAP = {1: "low", 2: "medium", 3: "high"}
+
+SHOPPING_LISTS = {
+    1: ["mineraalwater", "orange", "croissant", "pudding vanille",
+        "kokosmelk", "soep tomaat", "chips naturel"],
+    2: ["brood wit", "cupcakes", "kiwi", "chips paprika",
+        "green ice tea", "melk vol", "pudding kokos"],
+    3: ["pudding chocolade", "melk halfvol", "koekjes chocolade", "meloen",
+        "rijstwafels", "ice tea peach", "tortilla chips"],
+}
+
+LIST_LENGTH              = 7      # items per shopping list
+FIXATION_MIN_MS          = 100    # minimum fixation duration (ms) ≈ 5 samples at ~16ms
+TELEPORT_THRESHOLD       = 1.0    # CAM_POS jump (Unity units) = teleport
+TRACKER_LOSS_MIN_RUNS    = 3      # consecutive zero-samples = tracker loss
+SAVGOL_WINDOW            = 7      # Savitzky-Golay window (must be odd)
+SAVGOL_POLY              = 2      # Savitzky-Golay polynomial order
+WRONG_GRAB_PENALTY       = 1      # penalty subtracted per incorrect grab
+
+
+# =============================================================================
+# STAGE 1 — FILE INGESTION
+# =============================================================================
+
+def find_file_pairs(data_dir):
+    """
+    Scan data_dir for .txt files. Match task + eye file by participant ID
+    and condition number. Warn about any unpaired files.
+
+    Returns list of dicts:
+        { participant_id, condition_num, task_path, eye_path }
+    """
+    pass
+
+
+def parse_filename(filename):
+    """
+    Extract condition number, participant ID, and file type from filename.
+
+    Patterns:
+        Con{c}_ID{id}_VRSuperMarket_{n}_{dt}.txt        → task
+        Con{c}_ID{id}_VRSuperMarket_Eye_{n}_{dt}.txt    → eye
+
+    Returns (condition_num: int, participant_id: str, is_eye: bool)
+    """
+    pass
+
+
+def load_task_file(path):
+    """
+    Load semicolon-delimited task file. Convert OBJECT_ON_LIST to bool.
+
+    Columns: TIMESTAMP (float), PICKED_OBJECT (str), OBJECT_ON_LIST (bool)
+    Returns DataFrame.
+    """
+    pass
+
+
+def load_eye_file(path):
+    """
+    Load semicolon-delimited eye-tracking file (~9500 rows, ~16ms apart).
+
+    Columns: TIMESTAMP, CAM_POS_X/Y/Z, CAM_ROT_X/Y/Z,
+             GAZE_ORIGIN_X/Y/Z, GAZE_DIR_X/Y/Z,
+             PUPIL_LEFT, PUPIL_RIGHT, OBJECT
+    Returns DataFrame.
+    """
+    pass
+
+
+# =============================================================================
+# STAGE 2 — DATA CLEANING
+# =============================================================================
+# Flag invalid samples with boolean columns. Never delete rows.
+
+def detect_tracker_loss(eye_df):
+    """
+    Flag samples where GAZE_DIR_X/Y/Z are all 0.0 for >= TRACKER_LOSS_MIN_RUNS
+    consecutive samples. Adds boolean column TRACKER_LOSS.
+    Returns eye_df.
+    """
+    pass
+
+
+def detect_teleportation(eye_df):
+    """
+    Flag samples around sudden CAM_POS jumps > TELEPORT_THRESHOLD.
+    Flags 1 sample before and 2 after each jump.
+    Adds boolean column TELEPORT.
+    Returns eye_df.
+    """
+    pass
+
+
+def align_timestamps(eye_df, task_df):
+    """
+    Subtract eye_df's minimum timestamp from both DataFrames.
+    Eye file → starts at 0.0.
+    Task file → preserves offset from condition onset (first grab may be late).
+    Returns (eye_df, task_df).
+    """
+    pass
+
+
+# =============================================================================
+# STAGE 3 — GAZE KINEMATICS
+# =============================================================================
+# Convert raw Euler angles into a smoothed velocity signal for event detection.
+
+def euler_to_unit_vector(x_deg, y_deg, z_deg):
+    """
+    Convert Euler angles (degrees) to 3D unit vectors.
+    Treats x=pitch, y=yaw, z=roll. Avoids wraparound issues in velocity calc.
+    GAZE_DIR is head-relative, so no CAM_ROT subtraction needed.
+
+    Input:  three arrays (n_samples,)
+    Output: array (n_samples, 3)
+    """
+    pass
+
+
+def compute_angular_displacement(unit_vectors):
+    """
+    Angle between consecutive unit vectors via dot product → arccos.
+    Clips dot product to [-1, 1] to avoid arccos domain errors.
+
+    Input:  (n_samples, 3)
+    Output: (n_samples,) in degrees. First value = 0.
+    """
+    pass
+
+
+def compute_velocity(angular_displacement, timestamps):
+    """
+    velocity[i] = displacement[i] / (timestamps[i] - timestamps[i-1])
+    Per-sample delta handles dropped frames cleanly.
+
+    Output: (n_samples,) in °/s. First value = 0.
+    """
+    pass
+
+
+def compute_acceleration(velocity):
+    """
+    acceleration[i] = velocity[i] - velocity[i-1]
+    Used alongside velocity in saccade onset/offset detection.
+
+    Output: (n_samples,) in °/s². First value = 0.
+    """
+    pass
+
+
+def smooth_velocity(velocity):
+    """
+    Savitzky-Golay smoothing (SAVGOL_WINDOW, SAVGOL_POLY).
+    Preserves saccade peak shape better than a moving average.
+
+    Output: smoothed velocity array (n_samples,)
+    """
+    pass
+
+
+# =============================================================================
+# STAGE 4 — EVENT DETECTION  (Nyström & Holmqvist, 2010)
+# =============================================================================
+# Adaptive threshold avoids manual tuning and handles noise differences
+# across participants and sessions.
+
+def compute_adaptive_threshold(velocity):
+    """
+    Iteratively estimate velocity threshold from the signal's noise floor.
+
+    Algorithm:
+        1. Initial threshold = mean + 3×std of full signal
+        2. Keep only samples below threshold ("quiet" = presumed fixation)
+        3. Recompute threshold = mean + 6×std of quiet samples
+        4. Repeat until convergence
+
+    Returns threshold in °/s.
+    """
+    pass
+
+
+def classify_samples(velocity, acceleration, threshold):
+    """
+    Label each sample:
+        saccade           : velocity > threshold
+        glissade          : post-saccade, velocity <= threshold,
+                            acceleration still negative (decelerating)
+        fixation_candidate: everything else
+
+    Returns array of string labels (n_samples,)
+    """
+    pass
+
+
+def apply_glissade_policy(labels):
+    """
+    Merge glissades into preceding saccade.
+    Avoids inflating fixation durations with post-saccadic wobble.
+    Returns updated labels (no 'glissade' entries remain).
+    """
+    pass
+
+
+def apply_fixation_duration_filter(labels, timestamps):
+    """
+    Drop fixation_candidate runs shorter than FIXATION_MIN_MS (100ms ≈ 5 samples).
+    Surviving candidates are renamed 'fixation'.
+    Returns final labels: 'fixation' | 'saccade' | 'excluded'
+    """
+    pass
+
+
+# =============================================================================
+# STAGE 5 — FIXATION METRICS
+# =============================================================================
+# Translate labeled samples into attentional DVs for the ANCOVA.
+
+def assign_fixation_objects(eye_df, labels):
+    """
+    Group consecutive fixation samples into events.
+    Assign each event the majority-vote OBJECT label (ignoring 'nothing'
+    unless all samples are 'nothing').
+
+    Returns DataFrame:
+        [start_time, end_time, duration_ms, object]
+    """
+    pass
+
+
+def classify_fixation_relevance(fixations_df, condition_num):
+    """
+    Classify each fixation:
+        relevant   : object in SHOPPING_LISTS[condition_num]
+        irrelevant : named object not on list
+        neither    : object == 'nothing'
+
+    Note from meeting: 'nothing' is included in irrelevant for the
+    fixation ratio DV (relevant / all fixation time).
+
+    Adds column 'relevance'. Returns fixations_df.
+    """
+    pass
+
+
+def compute_eye_metrics(fixations_df, labels, timestamps):
+    """
+    Compute attentional DVs for one participant × condition.
+
+    Returns dict:
+        fixation_ratio              relevant / (relevant + irrelevant + neither)
+        fixation_time_relevant_ms
+        fixation_time_irrelevant_ms
+        n_fixations_relevant
+        n_fixations_irrelevant
+        mean_fixation_dur_relevant_ms
+        mean_fixation_dur_irrelevant_ms
+        saccade_rate                saccades / second
+        n_saccades
+    """
+    pass
+
+
+# =============================================================================
+# STAGE 6 — TASK PERFORMANCE
+# =============================================================================
+
+def compute_task_performance(task_df):
+    """
+    Compute performance DVs from the grab log.
+
+    Returns dict:
+        performance_score   correct / LIST_LENGTH
+        penalty_score       (correct - n_wrong_penalty) / LIST_LENGTH
+                            where n_wrong_penalty counts repeated wrong grabs
+                            penalised by WRONG_GRAB_PENALTY
+        grab_accuracy       correct / total grabs
+        n_correct
+        n_incorrect
+        completion_time_s   last timestamp - first timestamp
+    """
+    pass
+
+
+# =============================================================================
+# STAGE 7 — OUTPUT
+# =============================================================================
+
+def build_output_row(participant_id, low_metrics, medium_metrics, high_metrics):
+    """
+    Merge all three conditions into one row dict for this participant.
+    One row per participant — 15 rows total in results.csv.
+
+    Condition metrics are prefixed by condition label (low/medium/high).
+    Columns (see OUTPUT STRUCTURE in header for full list):
+        participant_id
+        sps_score                               ← single baseline value
+        low_*    — all performance + eye metrics for low condition
+        medium_* — all performance + eye metrics for medium condition
+        high_*   — all performance + eye metrics for high condition
+        Questionnaire placeholders per condition:
+            {cond}_post_fatigue, {cond}_perceived_overload,
+            {cond}_perceived_performance        ← empty until merged
+
+    Returns a dict.
+    """
+    pass
+
+
+def write_results(rows, output_path):
+    """
+    Write list of row dicts to CSV. Ask user before overwriting existing file.
+    """
+    pass
+
+
+# =============================================================================
+# STAGE 8 — ORCHESTRATION
+# =============================================================================
+
+def process_pair(task_path, eye_path, participant_id, condition_num):
+    """
+    Run stages 1–7 for one file pair. Print progress at each stage.
+    Return output row dict, or None on failure (with error message).
+    """
+    pass
+
+
+def run_all(data_dir, output_path):
+    """
+    Find all pairs → group by participant → process all 3 conditions per
+    participant → build one row per participant → write results.csv.
+    Print summary: n participants, n rows written, output path.
+    """
+    pass
+
+
+def run_one(data_dir, output_path):
+    """
+    Prompt for participant ID → process that participant's 3 conditions
+    → build one output row → write to CSV.
+    """
+    pass
+
+
+def preview_pairs(data_dir):
+    """
+    Print a table of all found file pairs with pairing status.
+    No processing. Used to verify data integrity before a full run.
+    """
+    pass
+
+
+def inspect_one(data_dir):
+    """
+    Prompt for participant ID + condition. Run full pipeline and print
+    all intermediate results in detail (for debugging/validation).
+    """
+    pass
+
+
+# =============================================================================
+# STAGE 9 — MENU
+# =============================================================================
+
+MENU = """
+╔══════════════════════════════════════════════════════╗
+║       VR SUPERMARKET EYE-TRACKING PIPELINE           ║
+║       Seeing Through Sensory Overload                ║
+╠══════════════════════════════════════════════════════╣
+║  1 — Process all participants  →  write results.csv  ║
+║  2 — Process one participant                         ║
+║  3 — Preview file pairs        (no processing)       ║
+║  4 — Inspect one participant   (detailed output)     ║
+║  5 — Exit                                            ║
+╚══════════════════════════════════════════════════════╝
+"""
+
+def get_data_dir():
+    """
+    Prompt for data directory path. Strip quotes (macOS drag-in).
+    Repeat until a valid directory is entered.
+    """
+    pass
+
+
+def get_output_path():
+    """
+    Prompt for output CSV path. Default: results.csv in current directory.
+    """
+    pass
+
+
+def menu():
+    """
+    Display menu, route input to the correct function. Loop until exit.
+    """
+    print(MENU)
+    while True:
+        choice = input("Select an option (1–5): ").strip()
+        if   choice == "1":
+            run_all(get_data_dir(), get_output_path())
+        elif choice == "2":
+            run_one(get_data_dir(), get_output_path())
+        elif choice == "3":
+            preview_pairs(get_data_dir())
+        elif choice == "4":
+            inspect_one(get_data_dir())
+        elif choice == "5":
+            print("Goodbye.")
+            break
+        else:
+            print("Please enter a number between 1 and 5.")
+        print(MENU)
+
+
+if __name__ == "__main__":
+    menu()
+
+
+python vr_pipeline.py
+    → menu()
+        → run_all()
+            → find_file_pairs()
+            → for each participant:
+                → process_pair()
+                    → load_task_file()
+                    → load_eye_file()
+                    → detect_tracker_loss()
+                    → detect_teleportation()
+                    → align_timestamps()
+                    → euler_to_unit_vector()
+                    → compute_angular_displacement()
+                    → compute_velocity()
+                    → compute_acceleration()
+                    → smooth_velocity()
+                    → compute_adaptive_threshold()
+                    → classify_samples()
+                    → apply_fixation_duration_filter()
+                    → assign_fixation_objects()
+                    → classify_fixation_relevance()
+                    → compute_eye_metrics()
+                    → compute_task_performance()
+                → build_output_row()
+            → write_results()

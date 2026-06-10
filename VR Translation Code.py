@@ -548,33 +548,72 @@ def compute_eye_metrics(fixations_df, labels, timestamps):
 # STAGE 6 — TASK PERFORMANCE
 # =============================================================================
 
+# def compute_task_performance(task_df):
+#    """
+#    Compute performance DVs from the grab log.
+#
+#    Returns dict:
+#        performance_score   correct / LIST_LENGTH
+#        penalty_score       (correct - n_wrong_penalty) / LIST_LENGTH                            
+#        grab_accuracy       correct / total grabs
+#        n_correct
+#        n_incorrect
+#        completion_time_s   last timestamp - first timestamp
+#    """
+#    # count correct and incorrect grabs
+#    n_correct   = task_df["OBJECT_ON_LIST"].sum()
+#    n_incorrect = (~task_df["OBJECT_ON_LIST"]).sum()
+#    n_total     = len(task_df)
+#
+#    # simple performance score — correct picks out of 7
+#    performance_score = n_correct / LIST_LENGTH
+#
+#    # penalty score — punishes wrong grabs, wider spread than simple score
+#    penalty_score = (n_correct - n_incorrect) / LIST_LENGTH
+#
+#    # grab accuracy — proportion of all grabs that were correct
+#    grab_accuracy = n_correct / n_total if n_total > 0 else None
+
+#    # completion time — duration of active picking phase in seconds
+#    completion_time_s = task_df["TIMESTAMP"].iloc[-1] - task_df["TIMESTAMP"].iloc[0]
+#
+#    return {
+#        "performance_score" : performance_score,
+#        "penalty_score"     : penalty_score,
+#        "grab_accuracy"     : grab_accuracy,
+#        "n_correct"         : n_correct,
+#        "n_incorrect"       : n_incorrect,
+#        "completion_time_s" : completion_time_s
+#    }
+
+def objective_performance(object_on_list, picked_object):
+    object_on_list = object_on_list[1:]   # skip first row
+    picked_object  = picked_object[1:]    # skip first row
+    score = 0
+    for i in range(len(object_on_list)):
+        if object_on_list[i] == "True":
+            score += 1
+        elif object_on_list[i] == "False" and picked_object[:i].count(picked_object[i]) % 2 == 1:
+            score -= 1    # -1 for every 2nd wrong pick of the same item
+    return score
+
 def compute_task_performance(task_df):
     """
     Compute performance DVs from the grab log.
-
-    Returns dict:
-        performance_score   correct / LIST_LENGTH
-        penalty_score       (correct - n_wrong_penalty) / LIST_LENGTH                            
-        grab_accuracy       correct / total grabs
-        n_correct
-        n_incorrect
-        completion_time_s   last timestamp - first timestamp
     """
-    # count correct and incorrect grabs
     n_correct   = task_df["OBJECT_ON_LIST"].sum()
     n_incorrect = (~task_df["OBJECT_ON_LIST"]).sum()
     n_total     = len(task_df)
 
-    # simple performance score — correct picks out of 7
     performance_score = n_correct / LIST_LENGTH
 
-    # penalty score — punishes wrong grabs, wider spread than simple score
-    penalty_score = (n_correct - n_incorrect) / LIST_LENGTH
+    # convert columns to lists and pass to penalty function
+    penalty_score = objective_performance(
+        task_df["OBJECT_ON_LIST"].astype(str).tolist(),
+        task_df["PICKED_OBJECT"].tolist()
+    )
 
-    # grab accuracy — proportion of all grabs that were correct
-    grab_accuracy = n_correct / n_total if n_total > 0 else None
-
-    # completion time — duration of active picking phase in seconds
+    grab_accuracy     = n_correct / n_total if n_total > 0 else None
     completion_time_s = task_df["TIMESTAMP"].iloc[-1] - task_df["TIMESTAMP"].iloc[0]
 
     return {
@@ -585,7 +624,6 @@ def compute_task_performance(task_df):
         "n_incorrect"       : n_incorrect,
         "completion_time_s" : completion_time_s
     }
-
 
 # =============================================================================
 # STAGE 7 — OUTPUT
