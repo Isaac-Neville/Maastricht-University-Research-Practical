@@ -1,12 +1,12 @@
-import os
-import re
-import numpy as np
-import pandas as pd
-from scipy.signal import savgol_filter
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import matplotlib.pyplot as plt
-
+import os       # file system operations
+import re       # regular expressions for filename parsing
+import numpy as np      # numerical operations
+import pandas as pd     # DataFrame operations
+from scipy.signal import savgol_filter      # Savitzky_Golay smoothing
+import tkinter as tk        
+from tkinter import filedialog, messagebox     # GUI dialogs for file/folder selection 
+import matplotlib.pyplot as plt     # visualisation
+from matplotlib.patches import Patch    # legend patches for fixation timeline
 
 # =============================================================================
 # STAGE 0 — CONFIGURATION
