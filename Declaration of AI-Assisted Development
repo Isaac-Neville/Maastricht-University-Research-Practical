@@ -1,0 +1,9 @@
+Declaration of AI-Assisted Development
+
+This repository contains code developed as part of a research project involving the processing of data from a virtual supermarket simulation and eye-tracking recordings for subsequent statistical analysis in JASP.
+
+During the development process, the generative AI tool Claude (Anthropic) was used as a programming assistance tool and directly contributed to the creation of substantial portions of the codebase. In several cases, code segments were generated in full or near-full form by the AI based on project requirements and developer prompts. The tool was also used to suggest and refine code structures and implementation approaches, assist in identifying and correcting programming errors, and provide explanations related to programming concepts as well as support for debugging.
+The overall data-processing workflow was designed independently by the authors. The authors defined the research requirements, determined which variables needed to be extracted from the raw datasets, and made all decisions regarding the implementation and structure of the analysis pipeline.
+
+All AI-generated suggestions were critically reviewed, modified where necessary, tested, and validated by the authors before being incorporated into the repository. The authors assume full responsibility for the final code, including its correctness, functionality, and suitability for the intended research use.
+No AI system was involved in the collection of experimental data, the statistical analysis performed in JASP, or the interpretation of the research results.
